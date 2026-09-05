@@ -36,10 +36,22 @@ class FakeAttendance:
 
 
 class FakeConn:
-    def __init__(self, users: List[FakeUser], events: List[FakeAttendance] = None):
+    def __init__(self, users: List[FakeUser], events: List[FakeAttendance] = None,
+                 device_time: datetime.datetime = None):
         self._users = users
         self._events = events or []
         self.disconnected = False
+        # A deliberately wrong default -- mirrors the real unit's dead-RTC
+        # symptom (found 2026-09-06: reads ~23 years behind actual time)
+        # rather than a plausible one, so a test that forgets to check
+        # set_time actually ran would notice.
+        self._device_time = device_time or datetime.datetime(2003, 10, 10, 16, 43, 8)
+
+    def get_time(self) -> datetime.datetime:
+        return self._device_time
+
+    def set_time(self, timestamp: datetime.datetime) -> None:
+        self._device_time = timestamp
 
     def get_users(self) -> List[FakeUser]:
         return list(self._users)
@@ -79,14 +91,14 @@ class FakeZK:
 
 
 def make_client(users=None, enable_writes: bool = True,
-                events=None) -> tuple[Scr100Client, FakeConn]:
+                events=None, device_time=None) -> tuple[Scr100Client, FakeConn]:
     settings = Settings(
         scr100_host="127.0.0.1", scr100_port=4370, scr100_password=0,
         scr100_timeout_seconds=1.0, scr100_force_udp=True, scr100_ommit_ping=True,
         scr100_enable_writes=enable_writes, scr100_api_key="test-key",
     )
     client = Scr100Client(settings)
-    conn = FakeConn(list(users or []), list(events or []))
+    conn = FakeConn(list(users or []), list(events or []), device_time)
     client._new_zk = lambda: FakeZK(conn)  # type: ignore[method-assign]
     return client, conn
 
@@ -193,3 +205,53 @@ def test_list_events_respects_limit():
     events = [FakeAttendance(uid=i, user_id=str(i), timestamp=ts) for i in range(5)]
     client, _ = make_client(events=events)
     assert len(client.list_events(limit=2)) == 2
+
+
+class _FixedNow(datetime.datetime):
+    """Stands in for `datetime` inside app.scr100_client so device_time/
+    set_time's "host time" side is deterministic, matching real production
+    once its clock got fixed (2026-09-06)."""
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.datetime(2026, 9, 6, 12, 0, 0)
+
+
+def _wrong_device_clock() -> datetime.datetime:
+    # The real unit's actual reading, 2026-09-06 -- ~23 years behind, from a
+    # dead RTC backup battery. Used as the default "before" fixture so a
+    # test that forgets to check set_time actually ran would notice.
+    return datetime.datetime(2003, 10, 10, 16, 43, 8)
+
+
+def test_device_time_reports_drift(monkeypatch):
+    import app.scr100_client as scr100_client_module
+    monkeypatch.setattr(scr100_client_module, "datetime", _FixedNow)
+    client, _ = make_client(device_time=_wrong_device_clock())
+    result = client.device_time()
+    assert result["device_time"] == "2003-10-10T16:43:08"
+    assert result["host_time"] == "2026-09-06T12:00:00"
+    assert result["drift_seconds"] > 0
+
+
+def test_set_time_pushes_host_time_onto_the_device(monkeypatch):
+    import app.scr100_client as scr100_client_module
+    monkeypatch.setattr(scr100_client_module, "datetime", _FixedNow)
+    client, conn = make_client(device_time=_wrong_device_clock())
+    result = client.set_time()
+    assert result["before"]["device_time"] == "2003-10-10T16:43:08"
+    assert result["after"]["device_time"] == "2026-09-06T12:00:00"
+    assert conn._device_time == datetime.datetime(2026, 9, 6, 12, 0, 0)
+
+
+def test_set_time_dry_run_does_not_write():
+    client, conn = make_client(device_time=_wrong_device_clock())
+    result = client.set_time(dry_run=True)
+    assert result["dry_run"] is True
+    assert "after" not in result
+    assert conn._device_time == _wrong_device_clock()
+
+
+def test_set_time_requires_writes_enabled():
+    client, _ = make_client(enable_writes=False, device_time=_wrong_device_clock())
+    with pytest.raises(Scr100WritesDisabled):
+        client.set_time()

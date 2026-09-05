@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -11,11 +12,31 @@ from .scr100_client import (
     Scr100WritesDisabled,
 )
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="ZKTeco SCR100 Gateway API",
     version="0.1.0",
     description="HTTP API for querying and managing a ZKTeco SCR100 standalone controller.",
 )
+
+
+@app.on_event("startup")
+def _sync_device_clock_on_startup() -> None:
+    """Best-effort: push the correct time onto the device every time this
+    service starts, so an RTC that silently drifted wrong (dead backup
+    battery -- see Scr100Client.device_time) is caught within one restart
+    instead of quietly breaking event ingestion until someone notices the
+    log has gone quiet. Never blocks or fails startup -- the device being
+    unreachable at boot must not take the whole gateway down with it.
+    """
+    settings = get_settings()
+    if not settings.scr100_enable_writes:
+        return
+    try:
+        Scr100Client(settings).set_time()
+    except Exception:
+        logger.warning("startup clock sync failed -- device may be unreachable", exc_info=True)
 
 
 class UserCreateRequest(BaseModel):
@@ -34,6 +55,10 @@ class UserDeleteRequest(BaseModel):
 class SetCardRequest(BaseModel):
     uid: str
     card: str
+    dry_run: bool = False
+
+
+class SetTimeRequest(BaseModel):
     dry_run: bool = False
 
 
@@ -71,8 +96,8 @@ def _call(fn):
 def root() -> dict:
     return {
         "service": "scr100-gateway",
-        "endpoints": ["/device/health", "/users", "/users/create", "/users/delete",
-                     "/users/set-card", "/events"],
+        "endpoints": ["/device/health", "/device/time", "/device/set-time", "/users",
+                     "/users/create", "/users/delete", "/users/set-card", "/events"],
     }
 
 
@@ -83,6 +108,16 @@ def device_health(client: Scr100Client = Depends(get_client)) -> dict:
         "driver": client.driver_status(),
         "writes_enabled": client.settings.scr100_enable_writes,
     }
+
+
+@app.get("/device/time")
+def device_time(client: Scr100Client = Depends(get_client)) -> dict:
+    return _call(client.device_time)
+
+
+@app.post("/device/set-time", dependencies=[Depends(_require_api_key)])
+def set_time(req: SetTimeRequest, client: Scr100Client = Depends(get_client)) -> dict:
+    return _call(lambda: client.set_time(dry_run=req.dry_run))
 
 
 @app.get("/users")

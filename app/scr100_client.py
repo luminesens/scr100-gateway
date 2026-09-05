@@ -28,6 +28,7 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from .config import Settings
@@ -161,6 +162,55 @@ class Scr100Client:
                 timeout_seconds=self.settings.scr100_timeout_seconds,
                 error=str(exc),
             )
+
+    def device_time(self) -> Dict[str, Any]:
+        """The device's own clock, read live -- never cached, never assumed
+        synced.
+
+        A standalone terminal like this one has no NTP client; it relies on
+        an onboard RTC with its own backup battery, and once that battery
+        dies, a power loss resets the clock to some arbitrary firmware
+        default and it keeps ticking from there, wrong, until something
+        pushes the real time back onto it. Confirmed live against the real
+        unit, 2026-09-06: read twice five seconds apart, it advanced by
+        exactly five seconds while reading ~23 years behind actual time --
+        a genuinely running clock, just anchored to the wrong moment, not a
+        stuck or garbage read.
+        """
+        device_now = self._with_connection(lambda conn: conn.get_time())
+        host_now = datetime.now()
+        return {
+            "device_time": device_now.isoformat(),
+            "host_time": host_now.isoformat(),
+            "drift_seconds": (host_now - device_now).total_seconds(),
+        }
+
+    def set_time(self, dry_run: bool = False) -> Dict[str, Any]:
+        """Push this host's current time onto the device.
+
+        There is no NTP path to the device itself, so this is the only
+        correction available -- and if the RTC backup battery really is
+        dead (see `device_time`'s docstring), it only lasts until the next
+        power loss resets the clock again. Meant to be called both on
+        demand and automatically on every gateway start (see main.py's
+        startup hook), so a clock that silently drifted wrong again is
+        caught within one restart instead of quietly breaking event
+        ingestion (every new event gets a garbage timestamp and is dropped
+        by the min_year filter in card-pipeline's events.py) until someone
+        notices the log has gone quiet.
+        """
+        if not dry_run and not self.settings.scr100_enable_writes:
+            raise Scr100WritesDisabled("write operations require SCR100_ENABLE_WRITES=true")
+
+        before = self.device_time()
+        result: Dict[str, Any] = {"dry_run": dry_run, "operation": "set_time", "before": before}
+        if dry_run:
+            return result
+
+        now = datetime.now()
+        self._with_connection(lambda conn: conn.set_time(now))
+        result["after"] = self.device_time()
+        return result
 
     # A genuinely large read (21,110 records against the real device,
     # 2026-09-06) -- generous relative to CALL_TIMEOUT_SECONDS, which is
