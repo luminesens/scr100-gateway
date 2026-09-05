@@ -71,6 +71,28 @@ def test_list_users_reads_seeded_population(running_device):
     assert cards == [1_000_001, 1_000_002, 1_000_003]
 
 
+def test_set_card_disable_then_restore_round_trips(running_device):
+    """The soft-disable path -- confirmed through the real wire protocol,
+    not just against a fake connection object (see test_client.py for
+    that). Real users on this device are seeded with uid=1..3 by
+    seed_fixed; uid=1 is one of them.
+    """
+    port, _state = running_device
+    client = _client_for(port, enable_writes=True)
+
+    disabled = client.set_card(uid="1", card="0")
+    assert disabled["verified"] == {"user_present": True, "card_matches": True,
+                                    "name_preserved": True}
+    users = client.list_users(uid="1")
+    assert len(users) == 1, "uid/name row must still exist"
+    assert users[0]["card"] == 0
+    assert users[0]["name"] == "TEST-1"
+
+    restored = client.set_card(uid="1", card="1000001")
+    assert restored["verified"]["card_matches"] is True
+    assert client.list_users(uid="1")[0]["card"] == 1000001
+
+
 def test_create_then_list_then_delete_round_trips(running_device):
     port, _state = running_device
     client = _client_for(port, enable_writes=True)

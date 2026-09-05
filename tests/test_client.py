@@ -34,6 +34,9 @@ class FakeConn:
         return list(self._users)
 
     def set_user(self, uid, name, privilege, user_id, card):
+        # Real pyzk/the real device update an existing uid in place rather
+        # than appending a duplicate -- set_card's tests depend on this.
+        self._users[:] = [u for u in self._users if u.uid != uid]
         self._users.append(FakeUser(uid=uid, name=name, privilege=privilege,
                                      user_id=user_id, card=card))
 
@@ -110,6 +113,43 @@ def test_create_user_verifies_after_write():
     result = client.create_user(uid="1", card="111", name="Test")
     assert result["verified"] == {"user_present": True, "card_matches": True}
     assert len(conn.get_users()) == 1
+
+
+def test_set_card_requires_existing_uid():
+    client, _ = make_client(users=[])
+    with pytest.raises(Scr100ClientError, match="was not found"):
+        client.set_card(uid="1", card="0")
+
+
+def test_set_card_disables_and_preserves_name():
+    client, conn = make_client(users=[FakeUser(uid=1, name="A37", card=111111111)])
+    result = client.set_card(uid="1", card="0")
+    assert result["verified"] == {"user_present": True, "card_matches": True,
+                                  "name_preserved": True}
+    users = conn.get_users()
+    assert len(users) == 1, "the uid/name row must still exist, not be deleted"
+    assert users[0].card == 0
+    assert users[0].name == "A37"
+
+
+def test_set_card_restores_a_real_value():
+    client, conn = make_client(users=[FakeUser(uid=1, name="A37", card=0)])
+    result = client.set_card(uid="1", card="111111111")
+    assert result["verified"]["card_matches"] is True
+    assert conn.get_users()[0].card == 111111111
+
+
+def test_set_card_dry_run_does_not_write():
+    client, conn = make_client(users=[FakeUser(uid=1, name="A37", card=111111111)])
+    result = client.set_card(uid="1", card="0", dry_run=True)
+    assert result["dry_run"] is True
+    assert conn.get_users()[0].card == 111111111, "unchanged"
+
+
+def test_set_card_requires_writes_enabled():
+    client, _ = make_client(users=[FakeUser(uid=1, card=111)], enable_writes=False)
+    with pytest.raises(Scr100WritesDisabled):
+        client.set_card(uid="1", card="0")
 
 
 def test_delete_user_requires_existing():

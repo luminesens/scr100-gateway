@@ -31,6 +31,12 @@ class UserDeleteRequest(BaseModel):
     dry_run: bool = False
 
 
+class SetCardRequest(BaseModel):
+    uid: str
+    card: str
+    dry_run: bool = False
+
+
 def get_client(settings: Settings = Depends(get_settings)) -> Scr100Client:
     return Scr100Client(settings)
 
@@ -65,7 +71,8 @@ def _call(fn):
 def root() -> dict:
     return {
         "service": "scr100-gateway",
-        "endpoints": ["/device/health", "/users", "/users/create", "/users/delete"],
+        "endpoints": ["/device/health", "/users", "/users/create", "/users/delete",
+                     "/users/set-card"],
     }
 
 
@@ -99,3 +106,8 @@ def create_user(req: UserCreateRequest, client: Scr100Client = Depends(get_clien
 @app.post("/users/delete", dependencies=[Depends(_require_api_key)])
 def delete_user(req: UserDeleteRequest, client: Scr100Client = Depends(get_client)) -> dict:
     return _call(lambda: client.delete_user(uid=req.uid, dry_run=req.dry_run))
+
+
+@app.post("/users/set-card", dependencies=[Depends(_require_api_key)])
+def set_card(req: SetCardRequest, client: Scr100Client = Depends(get_client)) -> dict:
+    return _call(lambda: client.set_card(uid=req.uid, card=req.card, dry_run=req.dry_run))

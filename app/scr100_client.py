@@ -249,6 +249,61 @@ class Scr100Client:
         }
         return result
 
+    def set_card(self, uid: str, card: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Rewrite an *existing* user's card field, keeping everything else.
+
+        This is the soft-disable/re-enable primitive: `card="0"` clears
+        access while the uid/name row -- and its history -- stays exactly
+        where it is, the same mechanism the operator already used by hand
+        via "Access Control Software" before this pipeline existed. Passing
+        the real card value back restores access on the same uid. Unlike
+        `create_user`, this *requires* the uid to already exist -- it never
+        creates one.
+        """
+        uid = (uid or "").strip()
+        card = (card or "").strip()
+        if not uid:
+            raise Scr100ClientError("uid is required")
+        if not uid.isdigit():
+            raise Scr100ClientError(f"uid must be numeric, got {uid!r}")
+        if not card.isdigit():
+            raise Scr100ClientError(f"card must be a decimal card number (or \"0\" to"
+                                    f" disable), got {card!r}")
+
+        before = self.list_users(uid=uid)
+        if not before:
+            raise Scr100ClientError(f"uid {uid} was not found on the device")
+        existing = before[0]
+
+        if not dry_run and not self.settings.scr100_enable_writes:
+            raise Scr100WritesDisabled("write operations require SCR100_ENABLE_WRITES=true")
+
+        result: Dict[str, Any] = {"dry_run": dry_run, "operation": "set_card",
+                                   "uid": uid, "before": existing}
+        if dry_run:
+            return result
+
+        def _do_set(conn: Any) -> None:
+            # Same reasoning as create_user: a fresh connection defaults to
+            # the legacy 28-byte format until a real get_users() read tells
+            # it otherwise.
+            conn.get_users()
+            conn.set_user(
+                uid=int(uid), name=existing.get("name") or "",
+                privilege=existing.get("privilege") or 0,
+                user_id=existing.get("user_id") or uid, card=int(card),
+            )
+
+        self._with_connection(_do_set)
+        after = self.list_users(uid=uid)
+        result["after"] = after[0] if after else None
+        result["verified"] = {
+            "user_present": bool(after),
+            "card_matches": bool(after) and str(after[0].get("card")) == card,
+            "name_preserved": bool(after) and after[0].get("name") == existing.get("name"),
+        }
+        return result
+
     def delete_user(self, uid: str, dry_run: bool = False) -> Dict[str, Any]:
         uid = (uid or "").strip()
         if not uid:
