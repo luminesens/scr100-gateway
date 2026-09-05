@@ -1,23 +1,26 @@
 """ZKTeco SCR100 client, over `pyzk` -- no DLL, no Wine, unlike c3-gateway.
 
-Reads are confirmed against the real unit, not just the library source:
-2026-08-29, `pyzk` (`force_udp=True`) connected to the live SCR100 and read
-1021 real users -- `platform=ZEM500`, `firmware=Ver 6.21 Jun 15 2009`,
-`card` values in the ~10-digit range matching `carduid.py`'s `four_byte()`,
-not the 3-byte range (DESIGN.md 12). `User`/`set_user()`'s `card` field is
-real, not assumed.
+Deployed and read-validated against the real unit, not just the library
+source or a simulator: 2026-09-05, running on the Armbian box at the
+SCR100's actual site (reached over Tailscale), `pyzk` (`force_udp=True`)
+read all 1021 real users correctly -- `platform=ZEM500`,
+`firmware=Ver 6.21 Jun 15 2009`, and five sampled cards' `card` values
+matched `carduid.py`'s `four_byte()` output in the master store exactly
+(DESIGN.md 12). `User`/`set_user()`'s `card` field is real, not assumed.
 
-What is *not* confirmed: writes (`create_user`/`delete_user` were never
-tried against the real device, by design -- see the throwaway-card plan in
-DESIGN.md 12), a specific known UID's `four_byte()` cross-checked against
-its live `card` value, and current reachability -- every probe *since* that
-successful read (TCP:4370 refused, a raw hand-built UDP `CMD_CONNECT` packet
-with a 15s timeout, and `pyzk` itself) got zero response, after the same
-device had also answered on :80 and :23 earlier that same session. That
-looks like a device-side state change (power cycle, reconfiguration) between
-sessions, not a protocol mismatch -- see HANDOVER.md 7.8. Run
-`scripts/probe_device.py` to check current status before trusting anything
-below in production.
+A truncation risk was found while building `scripts/fake_device.py`:
+installed `pyzk` 0.9's `__read_chunk` calls `recv(1024+8)` regardless of
+the chunk size it requested (confirmed against a minimal hand-built UDP
+server, not just by reading source), which could silently drop users past
+what fits in ~1KB per chunk. Against the real device this did not happen
+-- all 1021 came back -- but the bug in `pyzk` itself is real; revisit if
+the population ever grows well past this size. See
+`tests/test_fake_device.py`.
+
+What is *still not* confirmed: writes. `create_user`/`delete_user` are
+only exercised against the fake device and via `dry_run` against the real
+one -- see the throwaway-card plan in DESIGN.md 12 before flipping
+`SCR100_ENABLE_WRITES` on for real.
 """
 
 from __future__ import annotations

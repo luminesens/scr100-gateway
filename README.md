@@ -7,20 +7,22 @@ Unlike `c3-gateway`, this needs no Wine and no DLL: the SCR100 speaks ZKTeco's
 standard terminal protocol over TCP/UDP, which the pure-Python `pyzk` library
 implements directly.
 
-**Status: reads confirmed against the real device, writes are not, and the
-device has since gone quiet.** 2026-08-29, `pyzk` (`force_udp=True`) read
-1021 real users off the live SCR100 -- `platform=ZEM500`,
-`firmware=Ver 6.21 Jun 15 2009`, `card` values matching `carduid.py`'s
-`four_byte()` range. Every probe *since* (TCP:4370 refused; a raw hand-built
-UDP `CMD_CONNECT` packet, 15s timeout; `pyzk` itself) has gotten zero
-response, after the same device had also answered on :80 and :23 earlier
-that same session -- likely a device-side state change between sessions
-(power cycle, reconfiguration), not a protocol mismatch. See
-`app/scr100_client.py`'s module docstring and HANDOVER.md 7.8. Run
-`scripts/probe_device.py` once the device (or the Armbian relay box next to
-it) is reachable again -- and treat writes (`create_user`/`delete_user`) as
-unverified regardless, since they were deliberately never tried against the
-real device yet.
+**Status: deployed and read-validated against the real device; writes are
+still untried.** Running on a repurposed Amlogic S905 STB (Armbian,
+917MB RAM) on the SCR100's own site LAN, reached over Tailscale with no
+subnet route (see HANDOVER.md 7.8 for why). 2026-09-05: `get_users()` read
+all **1021** real users correctly -- `platform=ZEM500`,
+`firmware=Ver 6.21 Jun 15 2009`, and five sampled cards' `card` values
+matched `carduid.py`'s `four_byte()` output in the master store exactly.
+A truncation risk found while building `scripts/fake_device.py` (installed
+`pyzk` 0.9's `__read_chunk` calls `recv(1024+8)` regardless of the chunk
+size requested, confirmed against a minimal hand-built server) turned out
+not to bite this device's real traffic -- see
+`tests/test_fake_device.py`'s
+`test_large_population_silently_truncates_via_the_chunked_path` for how it
+was found, and don't assume it's safe to ignore if the population ever
+grows well past 1021. `create_user`/`delete_user` are still only exercised
+against the fake device -- `dry_run` only against the real one so far.
 
 ## Setup
 
