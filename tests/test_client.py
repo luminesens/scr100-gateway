@@ -5,6 +5,7 @@ gating, verify-after-write) independent of whether this specific SCR100 unit
 answers the protocol at all, which is still unverified (see
 app/scr100_client.py's module docstring).
 """
+import datetime
 from dataclasses import dataclass, field
 from typing import List
 
@@ -25,13 +26,26 @@ class FakeUser:
     card: int = 0
 
 
+@dataclass
+class FakeAttendance:
+    uid: int
+    user_id: str
+    timestamp: datetime.datetime
+    status: int = 0
+    punch: int = 2
+
+
 class FakeConn:
-    def __init__(self, users: List[FakeUser]):
+    def __init__(self, users: List[FakeUser], events: List[FakeAttendance] = None):
         self._users = users
+        self._events = events or []
         self.disconnected = False
 
     def get_users(self) -> List[FakeUser]:
         return list(self._users)
+
+    def get_attendance(self) -> List[FakeAttendance]:
+        return list(self._events)
 
     def set_user(self, uid, name, privilege, user_id, card):
         # Real pyzk/the real device update an existing uid in place rather
@@ -64,14 +78,15 @@ class FakeZK:
         return self._conn
 
 
-def make_client(users=None, enable_writes: bool = True) -> tuple[Scr100Client, FakeConn]:
+def make_client(users=None, enable_writes: bool = True,
+                events=None) -> tuple[Scr100Client, FakeConn]:
     settings = Settings(
         scr100_host="127.0.0.1", scr100_port=4370, scr100_password=0,
         scr100_timeout_seconds=1.0, scr100_force_udp=True, scr100_ommit_ping=True,
         scr100_enable_writes=enable_writes, scr100_api_key="test-key",
     )
     client = Scr100Client(settings)
-    conn = FakeConn(list(users or []))
+    conn = FakeConn(list(users or []), list(events or []))
     client._new_zk = lambda: FakeZK(conn)  # type: ignore[method-assign]
     return client, conn
 
@@ -163,3 +178,18 @@ def test_delete_user_removes_and_verifies():
     result = client.delete_user(uid="1")
     assert result["verified"] == {"user_removed": True}
     assert conn.get_users() == []
+
+
+def test_list_events_maps_fields():
+    ts = datetime.datetime(2026, 9, 5, 10, 30, 0)
+    client, _ = make_client(events=[FakeAttendance(uid=1, user_id="1", timestamp=ts)])
+    rows = client.list_events()
+    assert rows == [{"uid": 1, "user_id": "1", "timestamp": ts.isoformat(),
+                     "status": 0, "punch": 2}]
+
+
+def test_list_events_respects_limit():
+    ts = datetime.datetime(2026, 9, 5, 10, 30, 0)
+    events = [FakeAttendance(uid=i, user_id=str(i), timestamp=ts) for i in range(5)]
+    client, _ = make_client(events=events)
+    assert len(client.list_events(limit=2)) == 2

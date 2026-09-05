@@ -72,7 +72,7 @@ def root() -> dict:
     return {
         "service": "scr100-gateway",
         "endpoints": ["/device/health", "/users", "/users/create", "/users/delete",
-                     "/users/set-card"],
+                     "/users/set-card", "/events"],
     }
 
 
@@ -111,3 +111,11 @@ def delete_user(req: UserDeleteRequest, client: Scr100Client = Depends(get_clien
 @app.post("/users/set-card", dependencies=[Depends(_require_api_key)])
 def set_card(req: SetCardRequest, client: Scr100Client = Depends(get_client)) -> dict:
     return _call(lambda: client.set_card(uid=req.uid, card=req.card, dry_run=req.dry_run))
+
+
+@app.get("/events")
+def list_events(
+    limit: Optional[int] = None,
+    client: Scr100Client = Depends(get_client),
+) -> dict:
+    return {"items": _call(lambda: client.list_events(limit=limit))}

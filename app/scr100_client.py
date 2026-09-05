@@ -58,15 +58,20 @@ _CALL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 _T = TypeVar("_T")
 
 
-def _call_with_bounded_wait(fn: Callable[[], _T]) -> _T:
+def _call_with_bounded_wait(fn: Callable[[], _T], timeout: float = CALL_TIMEOUT_SECONDS) -> _T:
     """Acquire `_DEVICE_LOCK`, run `fn` on a worker thread, wait at most
-    `CALL_TIMEOUT_SECONDS` from the caller's side.
+    `timeout` from the caller's side.
 
     The lock is released inside `_locked_call` -- by the worker thread,
     whenever `fn` actually finishes -- never by this function on a timeout.
     A timed-out caller does not know whether the device is still mid-
     conversation and must not risk a second one starting on top of it; same
     reasoning as c3-gateway's `_PANEL_LOCK` (app/c3_client.py).
+
+    `timeout` is overridable per-call -- `list_events` pulls the device's
+    entire attendance log (confirmed 21,110 records against the real unit,
+    2026-09-06), a genuinely bigger read than a `get_users()` call, and
+    the default here is sized for the latter.
     """
     if not _DEVICE_LOCK.acquire(timeout=LOCK_ACQUIRE_TIMEOUT_SECONDS):
         raise Scr100ConnectionError(
@@ -82,10 +87,10 @@ def _call_with_bounded_wait(fn: Callable[[], _T]) -> _T:
 
     future = _CALL_EXECUTOR.submit(_locked_call)
     try:
-        return future.result(timeout=CALL_TIMEOUT_SECONDS)
+        return future.result(timeout=timeout)
     except concurrent.futures.TimeoutError:
         raise Scr100ConnectionError(
-            f"device did not respond within {CALL_TIMEOUT_SECONDS:.0f}s -- "
+            f"device did not respond within {timeout:.0f}s -- "
             "the call may still complete in the background; if this keeps "
             "happening the gateway process likely needs a restart"
         ) from None
@@ -156,6 +161,35 @@ class Scr100Client:
                 timeout_seconds=self.settings.scr100_timeout_seconds,
                 error=str(exc),
             )
+
+    # A genuinely large read (21,110 records against the real device,
+    # 2026-09-06) -- generous relative to CALL_TIMEOUT_SECONDS, which is
+    # sized for get_users()'s much smaller payload.
+    EVENTS_CALL_TIMEOUT_SECONDS = 120.0
+
+    def list_events(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """The device's own access log, oldest call first as pyzk returns it.
+
+        No server-side date filter exists (`pyzk` pulls the whole table in
+        one read, same shape of limitation as the C3 side's transaction
+        table -- see gateway.py's `door_events`), so `limit` only trims the
+        result after the fact; it does not make the read itself cheaper.
+
+        Timestamps are the device's own clock and not to be trusted at
+        face value: confirmed against the real unit, roughly 70% of all
+        records carry obviously-wrong years (2000, 2003, 2005) from
+        whenever its RTC last lost power, mixed in with genuine recent
+        ones (2025-2026). Filtering to a plausible range is the caller's
+        job (`card_pipeline`'s ingestion does this), not this method's --
+        this returns everything the device reports, verbatim.
+        """
+        rows = self._with_connection(
+            lambda conn: [self._event_to_dict(e) for e in conn.get_attendance()],
+            timeout=self.EVENTS_CALL_TIMEOUT_SECONDS,
+        )
+        if limit is not None:
+            rows = rows[:limit]
+        return rows
 
     def list_users(
         self,
@@ -340,7 +374,8 @@ class Scr100Client:
             ommit_ping=self.settings.scr100_ommit_ping,
         )
 
-    def _with_connection(self, fn: Callable[[Any], _T]) -> _T:
+    def _with_connection(self, fn: Callable[[Any], _T],
+                         timeout: float = CALL_TIMEOUT_SECONDS) -> _T:
         def _do() -> _T:
             zk_conn = self._new_zk()
             conn = None
@@ -353,7 +388,7 @@ class Scr100Client:
                 if conn is not None:
                     conn.disconnect()
 
-        return _call_with_bounded_wait(_do)
+        return _call_with_bounded_wait(_do, timeout=timeout)
 
     @staticmethod
     def _user_to_dict(user: Any) -> Dict[str, Any]:
@@ -365,6 +400,18 @@ class Scr100Client:
             "group_id": user.group_id,
             "user_id": user.user_id,
             "card": user.card,
+        }
+
+    @staticmethod
+    def _event_to_dict(event: Any) -> Dict[str, Any]:
+        return {
+            "uid": event.uid,
+            "user_id": event.user_id,
+            # ISO 8601, the device's own clock -- see list_events' docstring
+            # on why this needs a plausibility filter downstream.
+            "timestamp": event.timestamp.isoformat(),
+            "status": event.status,
+            "punch": event.punch,
         }
 
 
