@@ -30,6 +30,7 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TypeVar
+from zoneinfo import ZoneInfo
 
 from .config import Settings
 
@@ -57,6 +58,23 @@ _CALL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 _T = TypeVar("_T")
+
+# GP2's fixed physical location. The device has no timezone concept of its
+# own at all (confirmed 2026-09-06: CMD_OPTIONS_RRQ for "TimeZone"/"TZ"/
+# "GMTOffset"/"DST" all come back empty, unlike a real option such as
+# TimeServerIP) -- whatever naive value is pushed to it becomes "the time",
+# full stop. The Armbian box this gateway runs on is UTC (Etc/UTC), not
+# Jakarta, so a naive datetime.now() here silently pushed UTC instead of
+# local time the first time this was built -- every event timestamp
+# ingested while that stood was 7 hours behind real WIB time. This must
+# always be wall-clock Jakarta time, regardless of the host's own timezone.
+_DEVICE_TZ = ZoneInfo("Asia/Jakarta")
+
+
+def _local_now() -> datetime:
+    """Jakarta wall-clock time, naive -- see `_DEVICE_TZ` above for why this
+    can never be a bare `datetime.now()`."""
+    return datetime.now(_DEVICE_TZ).replace(tzinfo=None)
 
 
 def _call_with_bounded_wait(fn: Callable[[], _T], timeout: float = CALL_TIMEOUT_SECONDS) -> _T:
@@ -167,18 +185,20 @@ class Scr100Client:
         """The device's own clock, read live -- never cached, never assumed
         synced.
 
-        A standalone terminal like this one has no NTP client; it relies on
-        an onboard RTC with its own backup battery, and once that battery
-        dies, a power loss resets the clock to some arbitrary firmware
-        default and it keeps ticking from there, wrong, until something
-        pushes the real time back onto it. Confirmed live against the real
-        unit, 2026-09-06: read twice five seconds apart, it advanced by
-        exactly five seconds while reading ~23 years behind actual time --
-        a genuinely running clock, just anchored to the wrong moment, not a
-        stuck or garbage read.
+        A standalone terminal like this one has no NTP client of its own and
+        no timezone concept at all (see `_DEVICE_TZ` above); it relies on an
+        onboard RTC with its own backup battery, and once that battery dies,
+        a power loss resets the clock to some arbitrary firmware default and
+        it keeps ticking from there, wrong, until something pushes the real
+        time back onto it. Confirmed live against the real unit, 2026-09-06:
+        read twice five seconds apart, it advanced by exactly five seconds
+        while reading ~23 years behind actual time -- a genuinely running
+        clock, just anchored to the wrong moment, not a stuck or garbage
+        read. `host_now` is Jakarta wall-clock time regardless of what
+        timezone this process itself is running in.
         """
         device_now = self._with_connection(lambda conn: conn.get_time())
-        host_now = datetime.now()
+        host_now = _local_now()
         return {
             "device_time": device_now.isoformat(),
             "host_time": host_now.isoformat(),
@@ -207,7 +227,7 @@ class Scr100Client:
         if dry_run:
             return result
 
-        now = datetime.now()
+        now = _local_now()
         self._with_connection(lambda conn: conn.set_time(now))
         result["after"] = self.device_time()
         return result
