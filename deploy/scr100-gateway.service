@@ -1,0 +1,30 @@
+[Unit]
+Description=scr100-gateway - HTTP API for the ZKTeco SCR100
+After=network-online.target tailscaled.service chrony.service
+Wants=network-online.target chrony.service
+
+[Service]
+Type=simple
+User=scr100
+Group=scr100
+WorkingDirectory=/opt/scr100-gateway
+EnvironmentFile=/etc/scr100-gateway.env
+# This box has no battery RTC: it boots with the time fake-hwclock last saved
+# (seen 2026-10-25: 17 minutes stale; after a move it could be days), and
+# chronyd only corrects it ~10s later. The startup hook pushes this host's
+# clock onto the SCR100, so starting before the correction would write a stale
+# time to the device. Wait for a real sync (<0.5s off, up to ~2min); if it
+# never syncs the unit fails closed rather than pushing a wrong time. (No
+# internet also means no Tailscale, so nothing could reach the gateway anyway.)
+ExecStartPre=/usr/bin/chronyc waitsync 60 0.5 0 2
+TimeoutStartSec=150
+ExecStart=/opt/scr100-gateway/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8768
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/scr100-gateway
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
