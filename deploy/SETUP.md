@@ -36,3 +36,22 @@ service itself is only `app/` + `requirements.txt` + the unit in this folder.
   host's clock onto the SCR100. Do not remove it.
 - The SCR100 has no timezone concept; `_local_now()` pushes Jakarta wall-clock
   time regardless of the host's zone.
+
+## Hardening applied 2026-10-25 (re-apply after a rebuild)
+
+- **SSH**: `PasswordAuthentication no`, `PermitRootLogin prohibit-password`,
+  `X11Forwarding no`, `MaxAuthTries 3`. Put an authorized key in *before* turning
+  password login off, and verify a fresh key login before closing the old session
+  (the first rebuild used a 150s auto-revert as a safety net). The box then
+  accepts only the keys in `/root/.ssh/authorized_keys`.
+- **journald**: `Storage=persistent`, `SystemMaxUse=50M`. The stock config keeps the
+  journal in RAM, so a power cut destroyed the only evidence of why it died.
+- **Not done on purpose**: the root fs mounts `data=writeback` (set by `rootflags=` in
+  `/boot/extlinux/extlinux.conf`; ext4 cannot change data mode on remount). It keeps the
+  filesystem consistent after a power cut but a just-written file can come back empty.
+  Left alone because a typo in the bootloader config of a remote box means a box that
+  will not boot, and it is unclear whether `extlinux.conf` or `emmc_autoscript.cmd` is
+  the one actually read. Change it only with physical/serial access.
+- **Known gaps**: the OS is EOL Ubuntu 18.04 (~157 security updates pending, not applied --
+  a blanket upgrade could break this board's boot); `scr100` still has a login shell
+  (`/bin/bash`); no fail2ban (moot with key-only SSH).
